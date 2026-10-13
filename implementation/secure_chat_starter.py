@@ -243,7 +243,7 @@ def ratchet_key(chain_key):
 # ---------------------------------------------------------------------------
 
 def encrypt_message(key, plaintext, aad=None):
-    """TODO: Encrypt with AES-256-GCM and a fresh 12-byte nonce.
+    """Encrypt with AES-256-GCM and a fresh 12-byte nonce.
 
     Implementation checklist:
     - require a 32-byte key and string plaintext;
@@ -256,11 +256,30 @@ def encrypt_message(key, plaintext, aad=None):
     ``AESGCM.encrypt`` appends its 16-byte authentication tag to the returned
     ciphertext.  Do not separate or truncate that tag.
     """
-    raise NotImplementedError
+
+    if not isinstance(key, bytes) or len(key) != 32:
+        raise ValueError
+
+    if not isinstance(plaintext, str):
+        raise ValueError
+
+    if not isinstance(aad, bytes) and aad is not None:
+        raise ValueError
+
+    encoded_plaintext = plaintext.encode("utf-8")
+
+    if len(encoded_plaintext) > MAX_PLAINTEXT_BYTES:
+        raise ValueError
+
+    nonce = os.urandom(12)
+
+    ciphertext = AESGCM(key).encrypt(nonce, encoded_plaintext, aad)
+
+    return {"nonce": nonce.hex(), "ciphertext": ciphertext.hex()}
 
 
 def _decode_ciphertext_message(message):
-    """TODO: Validate and decode the public nonce/ciphertext fields.
+    """Validate and decode the public nonce/ciphertext fields.
 
     Before calling ``bytes.fromhex``:
     - require a dictionary;
@@ -274,11 +293,37 @@ def _decode_ciphertext_message(message):
     malformed encodings to ``ProtocolError``.  Return ``(nonce_bytes,
     ciphertext_and_tag_bytes)``.
     """
-    raise NotImplementedError
+
+    if not isinstance(message, dict):
+        raise ProtocolError
+
+    if "nonce" not in message or not isinstance(message["nonce"], str):
+        raise ProtocolError
+
+    if "ciphertext" not in message or not isinstance(message["ciphertext"], str):
+            raise ProtocolError
+
+    try:
+        nonce_bytes = _decode_lower_hex(message["nonce"])
+    except(ValueError):
+        raise ProtocolError
+
+    if not len(nonce_bytes) == 12:
+        raise ProtocolError
+
+    try:
+        ciphertext_and_tag_bytes =  _decode_lower_hex(message["ciphertext"])
+    except(ValueError):
+        raise ProtocolError
+
+    if len(ciphertext_and_tag_bytes) > MAX_PLAINTEXT_BYTES + 16 or len(ciphertext_and_tag_bytes) < 16:
+        raise ProtocolError
+
+    return (nonce_bytes, ciphertext_and_tag_bytes)
 
 
 def decrypt_message(key, message, aad=None):
-    """TODO: Validate, authenticate, decrypt, and UTF-8 decode a message.
+    """Validate, authenticate, decrypt, and UTF-8 decode a message.
 
     Call ``_decode_ciphertext_message`` before AES-GCM.  Let
     ``cryptography.exceptions.InvalidTag`` propagate when the key, nonce,
@@ -288,7 +333,17 @@ def decrypt_message(key, message, aad=None):
     Decode authenticated plaintext as UTF-8 and convert invalid UTF-8 to a
     ``ProtocolError``.
     """
-    raise NotImplementedError
+
+    nonce, ciphertext_and_tag = _decode_ciphertext_message(message)
+
+    plaintext_bytes = AESGCM(key).decrypt(nonce, ciphertext_and_tag, aad)
+
+    try:
+        plaintext = plaintext_bytes.decode("utf-8")
+    except(ValueError):
+        raise ProtocolError
+
+    return plaintext
 
 
 # ---------------------------------------------------------------------------

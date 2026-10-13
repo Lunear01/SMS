@@ -54,15 +54,15 @@ available wording does not express your intended experiment.
 > - **Explanation:** explain which identity or signed-transcript check your
 >   substitution tests and what the control would demonstrate.
 
-**Attack:** TODO
+**Attack:** Self-signed identity using the same name
 
-**Expected result:** TODO
+**Expected result:** Raises AuthenticationError
 
-**State after rejection:** TODO
+**State after rejection:** Active and pending state unchanged
 
-**Control:** TODO
+**Control:** Retry the orig hs, then exchange msgs
 
-**Explanation:** TODO
+**Explanation:** The attack fails because of the identity check. The control demonstrates that Alice only rejected Mallory's handshake since the pending handshake is still intact.
 
 ## AAD binding
 
@@ -78,13 +78,13 @@ available wording does not express your intended experiment.
 >   Original and fresh ciphertexts are different controls.
 > - **Explanation:** explain what your comparison would show about AAD binding.
 
-**Attack:** TODO
+**Attack:** Flip the first bit of the AAD, keeping the key, nonce, and ciphertext unchanged.
 
-**Expected result:** TODO
+**Expected result:** Raises InvalidTag.
 
-**Control:** TODO
+**Control:** Decrypt the original ciphertext with the correct AAD.
 
-**Explanation:** TODO
+**Explanation:** Only the AAD changes, so rejection checks whether the ciphertext is authenticated together with its associated data. Decrypting the same ciphertext with the original AAD checks that legitimate decryption still works.
 
 ## Ciphertext rejection without committing state
 

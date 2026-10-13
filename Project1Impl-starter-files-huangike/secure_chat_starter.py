@@ -129,7 +129,11 @@ def generate_ecdh_key_pair():
     - generate a new pair on every call; and
     - never serialize or transmit the private key.
     """
-    raise NotImplementedError
+    
+    private_key = ec.generate_private_key(ec.SECP384R1())
+    public_key = private_key.public_key()
+
+    return private_key, public_key
 
 
 def serialize_public_key(public_key):
@@ -145,8 +149,7 @@ def serialize_public_key(public_key):
 
 
 def deserialize_public_key(pem_bytes):
-    """TODO: Deserialize and validate a P-384 ECDH public key.
-
+    """Deserialize and validate a P-384 ECDH public key.
     Required checks:
     1. Convert parser ``TypeError``/``ValueError`` failures to ``ProtocolError``.
     2. Require an ``ec.EllipticCurvePublicKey``.
@@ -155,8 +158,19 @@ def deserialize_public_key(pem_bytes):
     Parsing a PEM object successfully does *not* prove it is the key type this
     protocol expects.
     """
-    raise NotImplementedError
 
+    try: 
+        key = serialization.load_pem_public_key(pem_bytes)
+    except (TypeError, ValueError):
+        raise ProtocolError
+
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise ProtocolError
+
+    if not isinstance(key.curve, ec.SECP384R1):
+        raise ProtocolError
+
+    return key
 
 def derive_shared_secret(private_key, peer_public_key):
     """TODO: Validate both P-384 keys and compute their ECDH shared secret.
@@ -165,7 +179,36 @@ def derive_shared_secret(private_key, peer_public_key):
     ``private_B.exchange(ECDH, public_A)``.  Return the raw shared bytes for
     HKDF; do not use them directly with AES-GCM.
     """
+
+    validate_private_keys(private_key)
+    validate_public_keys(peer_public_key)
+
+    
+    
+
     raise NotImplementedError
+
+def validate_private_keys(private_key):
+    """ Validates private keys only """
+
+    if not isinstance(private_key, ec.EllipticCurvePrivateKey):
+        raise ProtocolError
+    
+    if not isinstance(private_key.curve, ec.SECP384R1):
+        raise ProtocolError
+
+    return None
+
+def validate_public_keys(public_key):
+    """ Validates private keys only """
+
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
+        raise ProtocolError
+    
+    if not isinstance(public_key.curve, ec.SECP384R1):
+        raise ProtocolError
+
+    return None
 
 
 def hkdf_expand(secret, info=b"secure chat", salt=None):

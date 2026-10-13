@@ -1,0 +1,472 @@
+"""Starter code for CSC 364 Project 1.
+
+The project is easiest to complete in stages.  Implement and test the small
+stateless helpers first, then the handshake, and finally the stateful message
+ratchet.  A recommended order is:
+
+1. ``generate_ecdh_key_pair``, public-key parsing, and ``derive_shared_secret``
+2. ``hkdf_expand`` and ``ratchet_key``
+3. ``encrypt_message`` and ``decrypt_message``
+4. ``Party.create_handshake`` and ``Party.establish_session``
+5. ``Party.send`` and in-order ``Party.receive``
+6. replay rejection and bounded out-of-order delivery
+7. negative tests for tampering, identity substitution, and state rollback
+
+Read README.md before implementing a TODO.  It defines exact wire fields,
+roles, size limits, and security behavior expected by the tests.
+
+Important security rules:
+
+* Never trust an identity key merely because it appears in a handshake.  It
+  must match ``trusted_peer_identity``, which represents an out-of-band pin.
+* Never use a raw ECDH secret directly as an AES key; derive purpose-specific
+  keys with HKDF.
+* Never use a persistent chain key as a message key.  ``ratchet_key`` must
+  return two distinct outputs.
+* Never update receiving state before AES-GCM authentication succeeds.
+* Do not replace precise protocol/authentication exceptions with a broad
+  ``except Exception`` handler.
+"""
+
+# These imports are intentionally provided even though some remain unused until
+# you complete the corresponding TODOs.
+import hashlib
+import hmac
+import json
+import os
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+
+# ---------------------------------------------------------------------------
+# Protocol constants and exact wire schemas
+# ---------------------------------------------------------------------------
+
+PROTOCOL_VERSION = "CSC364-SecureChat-v2"
+
+# Check attacker-controlled sizes before parsing or allocating large values.
+MAX_HANDSHAKE_BYTES = 4096
+MAX_PLAINTEXT_BYTES = 1024 * 1024
+MAX_SKIP = 100
+
+# These sets are provided so your parser can require exact schemas.  Use
+# ``set(parsed_dictionary) == expected_fields`` rather than checking only that
+# a few required keys happen to be present.
+_HANDSHAKE_PAYLOAD_FIELDS = {
+    "version",
+    "name",
+    "identity_key",
+    "ephemeral_key",
+    "nonce",
+}
+_HANDSHAKE_FIELDS = _HANDSHAKE_PAYLOAD_FIELDS | {"signature"}
+_HEADER_FIELDS = {"version", "session_id", "direction", "message_number"}
+
+
+class ProtocolError(ValueError):
+    """Malformed input or invalid protocol state, but not failed signatures."""
+
+
+class AuthenticationError(ProtocolError):
+    """Raised when a signed handshake does not match the trusted identity."""
+
+
+class ReplayError(ProtocolError):
+    """Raised when an already-consumed message is received again."""
+
+
+def _canonical_json(value):
+    """Return the one deterministic JSON encoding used by both endpoints.
+
+    Cryptographic operations authenticate bytes.  If Alice signs one JSON
+    representation while Bob verifies another representation of the same
+    dictionary, verification fails.  Always call this helper for signed
+    payloads, complete handshakes, and message-header AAD.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _decode_lower_hex(value, field_name):
+    """Decode the exact lowercase hexadecimal representation used on the wire.
+
+    This helper is complete.  Do not replace it with an unchecked
+    ``bytes.fromhex`` call: that parser ignores ASCII whitespace, so encoded
+    length checks alone do not enforce a decoded byte length.
+    """
+    if (
+        not isinstance(value, str)
+        or len(value) % 2
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ProtocolError(f"{field_name} must be lowercase hexadecimal")
+    return bytes.fromhex(value)
+
+
+def _length_prefix(value):
+    """Make transcript concatenation unambiguous by prefixing a byte length."""
+    return len(value).to_bytes(4, "big") + value
+
+
+def encode_aad(header):
+    """Serialize public header data that AES-GCM must authenticate."""
+    return _canonical_json(header)
+
+
+# ---------------------------------------------------------------------------
+# Part 1: ECDH and key derivation
+# ---------------------------------------------------------------------------
+
+def generate_ecdh_key_pair():
+    """TODO: Return a fresh ``(private_key, public_key)`` on P-384.
+
+    Hints:
+    - use ``ec.generate_private_key(ec.SECP384R1())``;
+    - derive the public key from the new private key;
+    - generate a new pair on every call; and
+    - never serialize or transmit the private key.
+    """
+    raise NotImplementedError
+
+
+def serialize_public_key(public_key):
+    """Serialize an ECDH public key as SubjectPublicKeyInfo PEM.
+
+    This helper is complete.  Notice that a serialized key records its
+    algorithm and curve, which you must validate when loading it.
+    """
+    return public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+def deserialize_public_key(pem_bytes):
+    """TODO: Deserialize and validate a P-384 ECDH public key.
+
+    Required checks:
+    1. Convert parser ``TypeError``/``ValueError`` failures to ``ProtocolError``.
+    2. Require an ``ec.EllipticCurvePublicKey``.
+    3. Require the curve to be ``ec.SECP384R1``.
+
+    Parsing a PEM object successfully does *not* prove it is the key type this
+    protocol expects.
+    """
+    raise NotImplementedError
+
+
+def derive_shared_secret(private_key, peer_public_key):
+    """TODO: Validate both P-384 keys and compute their ECDH shared secret.
+
+    Alice's ``private_A.exchange(ECDH, public_B)`` must equal Bob's
+    ``private_B.exchange(ECDH, public_A)``.  Return the raw shared bytes for
+    HKDF; do not use them directly with AES-GCM.
+    """
+    raise NotImplementedError
+
+
+def hkdf_expand(secret, info=b"secure chat", salt=None):
+    """TODO: Derive exactly 32 bytes using HKDF-SHA256.
+
+    Validate that ``secret`` is non-empty bytes, ``info`` is bytes, and ``salt``
+    is bytes or ``None``.  Construct a new ``HKDF`` object for every derivation;
+    instances from ``cryptography`` are intentionally single use.
+
+    ``info`` is a domain-separation label.  Different purposes (root key,
+    direction, next chain, message key) require different labels.
+    """
+    raise NotImplementedError
+
+
+def ratchet_key(chain_key):
+    """TODO: Return ``(next_chain_key, one_time_message_key)``.
+
+    Derive both outputs from the *current* chain key using two distinct HKDF
+    ``info`` values:
+
+        CK_i -> next-chain label -> CK_(i+1)  (store this)
+        CK_i -> message-key label -> MK_i     (use once, discard)
+
+    Validate that the input is exactly 32 bytes.  The two outputs must be
+    deterministic for synchronized peers but different from each other.
+    """
+    raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Part 2: AES-GCM and defensive message parsing
+# ---------------------------------------------------------------------------
+
+def encrypt_message(key, plaintext, aad=None):
+    """TODO: Encrypt with AES-256-GCM and a fresh 12-byte nonce.
+
+    Implementation checklist:
+    - require a 32-byte key and string plaintext;
+    - require AAD to be bytes or ``None``;
+    - UTF-8 encode and enforce ``MAX_PLAINTEXT_BYTES``;
+    - generate ``os.urandom(12)`` for every call;
+    - call ``AESGCM(key).encrypt(nonce, encoded_plaintext, aad)``; and
+    - return ``{"nonce": <hex>, "ciphertext": <hex>}``.
+
+    ``AESGCM.encrypt`` appends its 16-byte authentication tag to the returned
+    ciphertext.  Do not separate or truncate that tag.
+    """
+    raise NotImplementedError
+
+
+def _decode_ciphertext_message(message):
+    """TODO: Validate and decode the public nonce/ciphertext fields.
+
+    Before calling ``bytes.fromhex``:
+    - require a dictionary;
+    - require a string nonce containing exactly 24 lowercase hex characters
+      (12 bytes);
+    - require an even-length lowercase-hex ciphertext string containing at
+      least the 16-byte GCM tag and no more than
+      ``MAX_PLAINTEXT_BYTES + 16`` bytes.
+
+    Use ``_decode_lower_hex`` and re-check decoded lengths defensively.  Convert
+    malformed encodings to ``ProtocolError``.  Return ``(nonce_bytes,
+    ciphertext_and_tag_bytes)``.
+    """
+    raise NotImplementedError
+
+
+def decrypt_message(key, message, aad=None):
+    """TODO: Validate, authenticate, decrypt, and UTF-8 decode a message.
+
+    Call ``_decode_ciphertext_message`` before AES-GCM.  Let
+    ``cryptography.exceptions.InvalidTag`` propagate when the key, nonce,
+    ciphertext, tag, or AAD is wrong.  That exception is security-relevant and
+    must not be converted into a successful result.
+
+    Decode authenticated plaintext as UTF-8 and convert invalid UTF-8 to a
+    ``ProtocolError``.
+    """
+    raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Part 3: Signed handshake helpers
+# ---------------------------------------------------------------------------
+
+def _identity_public_bytes(public_key):
+    """Serialize an Ed25519 public key as 32 raw bytes (helper is complete)."""
+    return public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _parse_handshake(handshake_bytes):
+    """TODO: Parse and structurally validate an untrusted handshake.
+
+    This helper does *not* decide whether the peer is trusted; that belongs in
+    ``establish_session``.  It should:
+
+    1. enforce ``MAX_HANDSHAKE_BYTES`` before JSON parsing;
+    2. require ASCII JSON with exactly ``_HANDSHAKE_FIELDS``;
+    3. require string fields, the expected version, and a 1-100 character name;
+    4. use ``_decode_lower_hex`` on identity, ephemeral key, nonce, and
+       signature;
+    5. require 32-byte identity, 16-byte nonce, and 64-byte signature values;
+    6. call ``deserialize_public_key`` on the decoded ephemeral PEM; and
+    7. return the parsed wire object, unsigned payload, decoded identity,
+       validated ECDH public key, and signature.
+
+    Convert syntax/encoding errors to ``ProtocolError``.  Signature verification
+    happens later because well-formed input is not necessarily authentic.
+    """
+    raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Part 4: Stateful participant
+# ---------------------------------------------------------------------------
+
+class Party:
+    """One participant in the instructional secure-chat protocol.
+
+    State is grouped by lifetime:
+    - the Ed25519 identity key persists across sessions;
+    - pending ECDH state lives only during one handshake; and
+    - sending/receiving chains and counters live for one active session.
+    """
+
+    def __init__(self, name, identity_private_key=None):
+        # TODO: Before assigning state, require ``name`` to be a non-empty string
+        # of at most 100 characters.  If a key is supplied, require an
+        # ``ed25519.Ed25519PrivateKey`` and raise ``TypeError`` otherwise.  These
+        # checks are part of the public API contract, not merely style.
+        if identity_private_key is None:
+            identity_private_key = ed25519.Ed25519PrivateKey.generate()
+
+        # Long-term identity state: signing only, never ECDH or AES.
+        self.name = name
+        self._identity_private_key = identity_private_key
+        self._identity_public_key = identity_private_key.public_key()
+
+        # Pending ephemeral handshake state.  Set these in create_handshake and
+        # clear them only after establish_session succeeds.
+        self._pending_ecdh_private = None
+        self._pending_handshake = None
+
+        # Active session state.  Sending and receiving chains advance
+        # independently; neither direction may reuse the other's chain.
+        self.sending_key = None
+        self.receiving_key = None
+        self.session_id = None
+        self.send_count = 0
+        self.receive_count = 0
+        self.send_direction = None
+        self.receive_direction = None
+        # Map message_number -> one-time key for authenticated gaps.  Bound its
+        # size by MAX_SKIP and delete an entry after one successful use.
+        self._skipped_message_keys = {}
+
+    def get_identity_public_bytes(self):
+        """Return the Ed25519 identity that peers must pin out of band.
+
+        In this in-memory simulation, direct access to the intended peer object
+        stands in for a trusted QR code, fingerprint, or certificate channel.
+        """
+        return _identity_public_bytes(self._identity_public_key)
+
+    def create_handshake(self):
+        """TODO: Create and sign a fresh ephemeral handshake.
+
+        Suggested sequence:
+        1. Reject the call if another handshake is already pending.
+        2. Generate a fresh P-384 ECDH pair.
+        3. Build the five-field payload documented in README.md.  Encode the
+           raw identity key and serialized ECDH public key as hexadecimal.
+        4. Add a fresh 16-byte random nonce.
+        5. Sign ``_canonical_json(payload)`` with the Ed25519 identity key.
+        6. Add the hex signature, canonicalize the complete wire object, save
+           the private key/wire bytes as pending state, and return the bytes.
+
+        Never sign a non-canonical encoding, never transmit the ECDH private
+        key, and never reuse an old pending key for a new session.
+        """
+        raise NotImplementedError
+
+    def get_public_bytes(self):
+        """Backward-compatible alias returning a full signed handshake.
+
+        Despite the historical name, this is not just raw public-key bytes.
+        """
+        return self.create_handshake()
+
+    def establish_session(
+        self,
+        peer_handshake_bytes,
+        trusted_peer_identity,
+        expected_peer_name,
+        role="initiator",
+    ):
+        """TODO: Authenticate the handshake and derive directional chains.
+
+        Implement this method in five phases.  Keep all candidate values in
+        local variables until phase 5.
+
+        Phase 1 - local preconditions:
+        - accept only ``initiator`` and ``responder`` roles;
+        - require a pending local handshake/private ECDH key;
+        - require a 32-byte ``trusted_peer_identity`` and a 1-100 character
+          expected name.
+
+        Phase 2 - peer authentication:
+        - parse with ``_parse_handshake``;
+        - use ``hmac.compare_digest`` to compare the embedded identity with the
+          independently trusted identity;
+        - require the signed name to equal ``expected_peer_name``; and
+        - reconstruct the Ed25519 public key and verify the signature over
+          ``_canonical_json(payload)``.  Convert ``InvalidSignature`` to
+          ``AuthenticationError``.
+
+        Phase 3 - common transcript:
+        - canonicalize the complete local and peer handshakes;
+        - order them *initiator first, responder second* on both endpoints;
+        - concatenate a protocol label and the two length-prefixed handshakes;
+        - compute SHA-256 of that transcript.
+
+        Phase 4 - secret derivation:
+        - perform ECDH with the pending private key and authenticated peer key;
+        - derive a transcript-bound root key with HKDF;
+        - derive independently labelled initiator-to-responder and
+          responder-to-initiator chain keys from the root.
+
+        Phase 5 - atomic commit:
+        - derive/store a transcript-bound session ID;
+        - assign chains/direction strings according to the local role;
+        - reset counters and skipped keys; and
+        - clear pending ECDH private state.
+
+        If phases 1-4 fail, the previous active session and pending handshake
+        must remain usable.  Trusting the identity key carried in the handshake
+        without comparing it to the pinned key is a complete MITM vulnerability.
+        """
+        raise NotImplementedError
+
+    def send(self, plaintext):
+        """TODO: Encrypt one message and advance the sending chain.
+
+        Checklist:
+        1. Require an established session.
+        2. Build the exact four-field header using the current send counter.
+        3. Derive ``(candidate_next_chain, message_key)``.
+        4. Encrypt with the message key and ``encode_aad(header)``.
+        5. Attach the public header to the returned message.
+        6. Only now commit the candidate chain and increment the counter.
+
+        Do not store ``message_key`` on ``self``.  It should become unreachable
+        when the method returns.
+        """
+        raise NotImplementedError
+
+    def receive(self, msg):
+        """TODO: Authenticate one message and advance the receiving chain.
+
+        Start by requiring an active session and validating the exact outer and
+        header schemas.  Check version, session ID, direction, and a non-negative
+        integer message number before doing KDF work.  The header must still be
+        used as AES-GCM AAD; pre-checking it is not a substitute for cryptographic
+        authentication.
+
+        Handle three number ranges:
+
+        - ``number < receive_count``: look up a retained skipped key.  Missing
+          means the message was already consumed, so raise ``ReplayError``.
+        - ``number == receive_count``: derive one normal ratchet step.
+        - ``number > receive_count``: derive forward to the target while saving
+          keys for missing numbers.  Reject if new plus existing skipped keys
+          would exceed ``MAX_SKIP``.
+
+        For the latter two cases, derive into local candidate variables.  Call
+        ``decrypt_message`` before assigning ``receiving_key``, incrementing
+        ``receive_count``, or merging skipped keys.  For an older skipped
+        message, delete its stored key only after successful authentication.
+
+        This validate-then-commit structure is what prevents a forged packet
+        from permanently desynchronizing Alice and Bob.
+        """
+        raise NotImplementedError
+
+
+def simulate_chat():
+    """TODO: Demonstrate an authenticated bidirectional session.
+
+    Create Alice and Bob, call ``create_handshake`` once on each, establish the
+    two sides with pinned identity bytes and opposite roles, then exchange at
+    least two Alice-to-Bob messages and one Bob-to-Alice reply.  Print encrypted
+    wire dictionaries and successfully recovered plaintexts, but never print
+    private, root, chain, or message keys.
+    """
+    raise NotImplementedError
+
+
+if __name__ == "__main__":
+    simulate_chat()

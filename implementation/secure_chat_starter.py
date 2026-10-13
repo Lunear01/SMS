@@ -218,8 +218,7 @@ def hkdf_expand(secret, info=b"secure chat", salt=None):
     ``info`` is a domain-separation label.  Different purposes (root key,
     direction, next chain, message key) require different labels.
     """
-    raise NotImplementedError
-
+    return HKDF(algorithm=hashes.SHA256(), length = 32, salt = salt, info = info).derive(secret)
 
 def ratchet_key(chain_key):
     """TODO: Return ``(next_chain_key, one_time_message_key)``.
@@ -233,7 +232,10 @@ def ratchet_key(chain_key):
     Validate that the input is exactly 32 bytes.  The two outputs must be
     deterministic for synchronized peers but different from each other.
     """
-    raise NotImplementedError
+    next_chain_key = hkdf_expand(chain_key, info=b"next-chain-key")
+    one_time_message_key = hkdf_expand(chain_key, info=b"one-time-message-key")
+
+    return next_chain_key, one_time_message_key
 
 
 # ---------------------------------------------------------------------------

@@ -121,7 +121,7 @@ def encode_aad(header):
 # ---------------------------------------------------------------------------
 
 def generate_ecdh_key_pair():
-    """TODO: Return a fresh ``(private_key, public_key)`` on P-384.
+    """Return a fresh ``(private_key, public_key)`` on P-384.
 
     Hints:
     - use ``ec.generate_private_key(ec.SECP384R1())``;
@@ -232,8 +232,8 @@ def ratchet_key(chain_key):
     Validate that the input is exactly 32 bytes.  The two outputs must be
     deterministic for synchronized peers but different from each other.
     """
-    next_chain_key = hkdf_expand(chain_key, info=b"next-chain-key")
-    one_time_message_key = hkdf_expand(chain_key, info=b"one-time-message-key")
+    next_chain_key = hkdf_expand(chain_key, info=b"CSC364-v2 symmetric ratchet|next-chain-key")
+    one_time_message_key = hkdf_expand(chain_key, info=b"CSC364-v2 symmetric ratchet|message-key")
 
     return next_chain_key, one_time_message_key
 
@@ -304,7 +304,7 @@ def _decode_ciphertext_message(message):
             raise ProtocolError
 
     try:
-        nonce_bytes = _decode_lower_hex(message["nonce"])
+        nonce_bytes = _decode_lower_hex(message["nonce"], "nonce")
     except(ValueError):
         raise ProtocolError
 
@@ -312,7 +312,7 @@ def _decode_ciphertext_message(message):
         raise ProtocolError
 
     try:
-        ciphertext_and_tag_bytes =  _decode_lower_hex(message["ciphertext"])
+        ciphertext_and_tag_bytes =  _decode_lower_hex(message["ciphertext"], "ciphertext")
     except(ValueError):
         raise ProtocolError
 
@@ -436,12 +436,21 @@ class Party:
     """
 
     def __init__(self, name, identity_private_key=None):
-        # TODO: Before assigning state, require ``name`` to be a non-empty string
+        # Before assigning state, require ``name`` to be a non-empty string
         # of at most 100 characters.  If a key is supplied, require an
         # ``ed25519.Ed25519PrivateKey`` and raise ``TypeError`` otherwise.  These
         # checks are part of the public API contract, not merely style.
+        if not isinstance(name, str):
+            raise TypeError("name must be a string")
+        
+        if not 1 <= len(name) <= 100:
+            raise ValueError("name must be 1-100 characters")
+        
         if identity_private_key is None:
             identity_private_key = ed25519.Ed25519PrivateKey.generate()
+            
+        elif not isinstance(identity_private_key, ed25519.Ed25519PrivateKey):
+            raise TypeError("identity_private_key must be an Ed25519PrivateKey")
 
         # Long-term identity state: signing only, never ECDH or AES.
         self.name = name
@@ -604,13 +613,13 @@ class Party:
         if not hmac.compare_digest(peer_identity, trusted_peer_identity):
             raise AuthenticationError("handshake identity does not match pinned key")
         
-        if payload[self.name] != expected_peer_name:
+        if payload["name"] != expected_peer_name:
             raise AuthenticationError("Invalid name for handshake")
         
         peer_identity_key = ed25519.Ed25519PublicKey.from_public_bytes(peer_identity)
 
         try: 
-            peer_identity_key.verify(signature, _canonical_json(json))
+            peer_identity_key.verify(signature, _canonical_json(payload))
         except InvalidSignature as e:
             raise AuthenticationError("Invalid handshake") from e
 
@@ -628,7 +637,7 @@ class Party:
         else:
             first, second = peer_handshake, local_handshake
 
-        transcript = (b"CSC364 authenticated handshake"+ _length_prefix(first)+ _length_prefix(second))
+        transcript = (b"CSC364 authenticated handshake v2" + _length_prefix(first)+ _length_prefix(second))
 
         transcript_hash = hashlib.sha256(transcript).digest()
 
@@ -639,13 +648,12 @@ class Party:
 
         shared_secret = derive_shared_secret(self._pending_ecdh_private, peer_ecdh_public)
 
-        root_key = hkdf_expand(shared_secret, info=b"CSC364-v2 root key" + transcript_hash, salt=transcript_hash)
+        root_key = hkdf_expand(shared_secret, info=b"CSC364-v2 root key|" + transcript_hash, salt=transcript_hash)
 
         initiator_to_responder = hkdf_expand(root_key, info=b"CSC364-v2 initiator-to-responder chain" + transcript_hash, salt=transcript_hash)
-
         responder_to_initiator = hkdf_expand(root_key, info=b"CSC364-v2 responder-to-initiator chain" + transcript_hash, salt=transcript_hash)
 
-        session_id = hashlib.sha256(b"CSC364-v2 session id" + transcript_hash).hexdigest()
+        session_id = hashlib.sha256(b"CSC364-v2 session id|" + transcript_hash).hexdigest()
 
         # Phase 5: atomic commit
         # - derive/store a transcript-bound session ID;
@@ -672,7 +680,7 @@ class Party:
         self._pending_handshake = None
 
     def send(self, plaintext):
-        """TODO: Encrypt one message and advance the sending chain.
+        """Encrypt one message and advance the sending chain.
 
         Checklist:
         1. Require an established session.
@@ -685,10 +693,26 @@ class Party:
         Do not store ``message_key`` on ``self``.  It should become unreachable
         when the method returns.
         """
-        raise NotImplementedError
+        if self.sending_key is None or self.session_id is None:
+            raise ProtocolError("no active session")
+
+        header = {
+            "version": PROTOCOL_VERSION,
+            "session_id": self.session_id,
+            "direction": self.send_direction,
+            "message_number": self.send_count,
+        }
+        candidate_next_chain, message_key = ratchet_key(self.sending_key)
+        wire = encrypt_message(message_key, plaintext, encode_aad(header))
+        wire["header"] = header
+
+        # Commit only after encryption succeeded.
+        self.sending_key = candidate_next_chain
+        self.send_count += 1
+        return wire
 
     def receive(self, msg):
-        """TODO: Authenticate one message and advance the receiving chain.
+        """Authenticate one message and advance the receiving chain.
 
         Start by requiring an active session and validating the exact outer and
         header schemas.  Check version, session ID, direction, and a non-negative
@@ -713,11 +737,69 @@ class Party:
         This validate-then-commit structure is what prevents a forged packet
         from permanently desynchronizing Alice and Bob.
         """
-        raise NotImplementedError
+        if self.receiving_key is None or self.session_id is None:
+            raise ProtocolError("no active session")
+        
+        if not isinstance(msg, dict) or set(msg) != {"nonce", "ciphertext", "header"}:
+            raise ProtocolError("message must contain exactly nonce, ciphertext, header")
+        
+        header = msg["header"]
+
+        if not isinstance(header, dict) or set(header) != _HEADER_FIELDS:
+            raise ProtocolError("header must contain exactly the required fields")
+        
+        if header["version"] != PROTOCOL_VERSION:
+            raise ProtocolError("unsupported protocol version")
+        
+        if header["session_id"] != self.session_id:
+            raise ProtocolError("message belongs to a different session")
+        
+        if header["direction"] != self.receive_direction:
+            raise ProtocolError("message was sent in the wrong direction")
+        
+        number = header["message_number"]
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            raise ProtocolError("message_number must be positive")
+        
+        aad = encode_aad(header)
+
+        # Retain skipped key, otherwise a replay
+        if number < self.receive_count:
+            message_key = self._skipped_message_keys.get(number)
+
+            if message_key is None:
+                raise ReplayError(f"message {number} was already consumed")
+            
+            plaintext = decrypt_message(message_key, msg, aad)
+            del self._skipped_message_keys[number]
+            return plaintext
+
+        # Derive forward into locals only
+        new_skips = number - self.receive_count
+        if len(self._skipped_message_keys) + new_skips > MAX_SKIP:
+            raise ProtocolError("skipped-key bound exceeded")
+        
+        candidate_chain = self.receiving_key
+        candidate_skipped = {}
+
+        for position in range(self.receive_count, number + 1):
+            candidate_chain, message_key = ratchet_key(candidate_chain)
+
+            if position < number:
+                candidate_skipped[position] = message_key
+
+        # Authenticate
+        plaintext = decrypt_message(message_key, msg, aad)
+
+        # Commit
+        self.receiving_key = candidate_chain
+        self.receive_count = number + 1
+        self._skipped_message_keys.update(candidate_skipped)
+        return plaintext
 
 
 def simulate_chat():
-    """TODO: Demonstrate an authenticated bidirectional session.
+    """Demonstrate an authenticated bidirectional session.
 
     Create Alice and Bob, call ``create_handshake`` once on each, establish the
     two sides with pinned identity bytes and opposite roles, then exchange at
@@ -725,7 +807,35 @@ def simulate_chat():
     wire dictionaries and successfully recovered plaintexts, but never print
     private, root, chain, or message keys.
     """
-    raise NotImplementedError
+    alice = Party("Alice")
+    bob = Party("Bob")
+
+    alice_handshake = alice.create_handshake()
+    bob_handshake = bob.create_handshake()
+
+    alice.establish_session(
+        bob_handshake,
+        trusted_peer_identity=bob.get_identity_public_bytes(),
+        expected_peer_name="Bob",
+        role="initiator",
+    )
+    bob.establish_session(
+        alice_handshake,
+        trusted_peer_identity=alice.get_identity_public_bytes(),
+        expected_peer_name="Alice",
+        role="responder",
+    )
+    print(f"session established: {alice.session_id}")
+
+    def relay(sender, receiver, plaintext):
+        wire = sender.send(plaintext)
+        print(f"\n{sender.name} -> {receiver.name} wire: {json.dumps(wire)}")
+        recovered = receiver.receive(wire)
+        print(f"{receiver.name} recovered: {recovered!r}")
+
+    relay(alice, bob, "Hi Bob, this channel is authenticated.")
+    relay(alice, bob, "Second message on the same sending chain.")
+    relay(bob, alice, "Hi Alice, reply on the opposite chain.")
 
 
 if __name__ == "__main__":

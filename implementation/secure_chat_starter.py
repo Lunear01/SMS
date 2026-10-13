@@ -173,7 +173,7 @@ def deserialize_public_key(pem_bytes):
     return key
 
 def derive_shared_secret(private_key, peer_public_key):
-    """TODO: Validate both P-384 keys and compute their ECDH shared secret.
+    """Validate both P-384 keys and compute their ECDH shared secret.
 
     Alice's ``private_A.exchange(ECDH, public_B)`` must equal Bob's
     ``private_B.exchange(ECDH, public_A)``.  Return the raw shared bytes for
@@ -183,19 +183,16 @@ def derive_shared_secret(private_key, peer_public_key):
     validate_private_keys(private_key)
     validate_public_keys(peer_public_key)
 
-    
-    
-
-    raise NotImplementedError
+    return private_key.exchange(ec.ECDH(), peer_public_key)
 
 def validate_private_keys(private_key):
-    """ Validates private keys only """
+    """ Validates public keys only """
 
     if not isinstance(private_key, ec.EllipticCurvePrivateKey):
-        raise ProtocolError
+        raise ValueError
     
     if not isinstance(private_key.curve, ec.SECP384R1):
-        raise ProtocolError
+        raise ValueError
 
     return None
 
@@ -203,10 +200,10 @@ def validate_public_keys(public_key):
     """ Validates private keys only """
 
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
-        raise ProtocolError
+        raise ValueError
     
     if not isinstance(public_key.curve, ec.SECP384R1):
-        raise ProtocolError
+        raise ValueError
 
     return None
 

@@ -209,7 +209,7 @@ def validate_public_keys(public_key):
 
 
 def hkdf_expand(secret, info=b"secure chat", salt=None):
-    """TODO: Derive exactly 32 bytes using HKDF-SHA256.
+    """Derive exactly 32 bytes using HKDF-SHA256.
 
     Validate that ``secret`` is non-empty bytes, ``info`` is bytes, and ``salt``
     is bytes or ``None``.  Construct a new ``HKDF`` object for every derivation;
@@ -221,7 +221,7 @@ def hkdf_expand(secret, info=b"secure chat", salt=None):
     return HKDF(algorithm=hashes.SHA256(), length = 32, salt = salt, info = info).derive(secret)
 
 def ratchet_key(chain_key):
-    """TODO: Return ``(next_chain_key, one_time_message_key)``.
+    """Return ``(next_chain_key, one_time_message_key)``.
 
     Derive both outputs from the *current* chain key using two distinct HKDF
     ``info`` values:

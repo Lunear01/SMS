@@ -91,6 +91,19 @@ class TestSecureChatStarter(unittest.TestCase):
 
     # Add any extra local regression tests that help you develop and debug.
     # Keep them deterministic and assert precise exception types and state.
+    def test_handshake_rejects_unpinned_identity(self):
+        alice, bob, mallory = chat.Party("Alice"), chat.Party("Bob"), chat.Party("Mallory")
+        alice.create_handshake()
+        mallory_handshake = mallory.create_handshake()
+        with self.assertRaises(chat.AuthenticationError):
+            alice.establish_session(
+                mallory_handshake,
+                trusted_peer_identity=bob.get_identity_public_bytes(),
+                expected_peer_name="Bob",
+                role="initiator",
+            )
+        self.assertIsNone(alice.session_id)
+        self.assertIsNotNone(alice._pending_ecdh_private)
 
 
 if __name__ == "__main__":

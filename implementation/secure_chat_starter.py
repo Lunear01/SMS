@@ -304,7 +304,7 @@ def _identity_public_bytes(public_key):
 
 
 def _parse_handshake(handshake_bytes):
-    """TODO: Parse and structurally validate an untrusted handshake.
+    """Parse and structurally validate an untrusted handshake.
 
     This helper does *not* decide whether the peer is trusted; that belongs in
     ``establish_session``.  It should:
@@ -322,7 +322,49 @@ def _parse_handshake(handshake_bytes):
     Convert syntax/encoding errors to ``ProtocolError``.  Signature verification
     happens later because well-formed input is not necessarily authentic.
     """
-    raise NotImplementedError
+    if not isinstance(handshake_bytes, bytes):
+        raise ProtocolError("handshake must be bytes")
+    
+    if len(handshake_bytes) > MAX_HANDSHAKE_BYTES:
+        raise ProtocolError("handshake more than MAX_HANDSHAKE_BYTES")
+    
+    try:
+        wire = json.loads(handshake_bytes.decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ProtocolError("handshake is not ASCII JSON") from exc
+    
+    if not isinstance(wire, dict) or set(wire) != _HANDSHAKE_FIELDS:
+        raise ProtocolError("handshake must contain exactly the required fields")
+    
+    if not all(isinstance(value, str) for value in wire.values()):
+        raise ProtocolError("handshake fields must be strings")
+    
+    if _canonical_json(wire) != handshake_bytes:
+        raise ProtocolError("handshake is not canonical JSON")
+    
+    if wire["version"] != PROTOCOL_VERSION:
+        raise ProtocolError("unsupported protocol version")
+    
+    if not 1 <= len(wire["name"]) <= 100:
+        raise ProtocolError("name must be 1-100 characters")
+
+    identity = _decode_lower_hex(wire["identity_key"], "identity_key")
+    ephemeral_pem = _decode_lower_hex(wire["ephemeral_key"], "ephemeral_key")
+    nonce = _decode_lower_hex(wire["nonce"], "nonce")
+    signature = _decode_lower_hex(wire["signature"], "signature")
+
+    if len(identity) != 32:
+        raise ProtocolError("identity_key must be 32 bytes")
+    
+    if len(nonce) != 16:
+        raise ProtocolError("nonce must be 16 bytes")
+    
+    if len(signature) != 64:
+        raise ProtocolError("signature must be 64 bytes")
+
+    ephemeral_public = deserialize_public_key(ephemeral_pem)
+    payload = {field: wire[field] for field in _HANDSHAKE_PAYLOAD_FIELDS}
+    return wire, payload, identity, ephemeral_public, signature                                                                                                                
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +420,7 @@ class Party:
         return _identity_public_bytes(self._identity_public_key)
 
     def create_handshake(self):
-        """TODO: Create and sign a fresh ephemeral handshake.
+        """Create and sign a fresh ephemeral handshake.
 
         Suggested sequence:
         1. Reject the call if another handshake is already pending.
@@ -393,7 +435,29 @@ class Party:
         Never sign a non-canonical encoding, never transmit the ECDH private
         key, and never reuse an old pending key for a new session.
         """
-        raise NotImplementedError
+
+        if self._pending_ecdh_private is not None:
+            raise ProtocolError("a handshake is already pending")
+
+        ecdh_private, ecdh_public = generate_ecdh_key_pair()
+
+        payload = {
+            "version": PROTOCOL_VERSION,
+            "name": self.name,
+            "identity_key": _identity_public_bytes(self._identity_public_key).hex(),
+            "ephemeral_key": serialize_public_key(ecdh_public).hex(),
+            "nonce": os.urandom(16).hex(),
+        }
+
+        signature = self._identity_private_key.sign(_canonical_json(payload))
+
+        handshake = dict(payload)
+        handshake["signature"] = signature.hex()
+        wire_bytes = _canonical_json(handshake)
+
+        self._pending_ecdh_private = ecdh_private
+        self._pending_handshake = wire_bytes
+        return wire_bytes
 
     def get_public_bytes(self):
         """Backward-compatible alias returning a full signed handshake.
@@ -409,7 +473,7 @@ class Party:
         expected_peer_name,
         role="initiator",
     ):
-        """TODO: Authenticate the handshake and derive directional chains.
+        """Authenticate the handshake and derive directional chains.
 
         Implement this method in five phases.  Keep all candidate values in
         local variables until phase 5.
@@ -451,7 +515,106 @@ class Party:
         must remain usable.  Trusting the identity key carried in the handshake
         without comparing it to the pinned key is a complete MITM vulnerability.
         """
-        raise NotImplementedError
+        # Phase 1: Local preconditions
+        # - accept only ``initiator`` and ``responder`` roles;
+        # - require a pending local handshake/private ECDH key;
+        # - require a 32-byte ``trusted_peer_identity`` and a 1-100 character expected name.
+
+        if role not in ("initiator", "responder"):
+            raise ValueError("role is not initiator or responder")
+        
+        if self._pending_ecdh_private is None or self._pending_handshake is None:
+            raise ProtocolError("no pending handshake")
+        
+        if not isinstance(trusted_peer_identity, bytes):
+            raise TypeError("trusted_peer_identity must be bytes")
+        
+        if len(trusted_peer_identity) != 32:
+            raise ValueError("trusted_peer_identity must be 32 bytes")
+        
+        if not isinstance(expected_peer_name, str):
+            raise TypeError("expected_peer_name must be a string")
+        
+        if not 1 <= len(expected_peer_name) <= 100:
+            raise ValueError("expected_peer_name must be 1-100 characters")
+
+        # Phase 2: peer authentication
+        #  - parse with ``_parse_handshake``;
+        # - use ``hmac.compare_digest`` to compare the embedded identity with the independently trusted identity;
+        # - require the signed name to equal ``expected_peer_name``; and
+        # - reconstruct the Ed25519 public key and verify the signature over ``_canonical_json(payload)``.  Convert ``InvalidSignature`` to ``AuthenticationError``.
+        
+        wire, payload, peer_identity, peer_ecdh_public, signature = _parse_handshake(peer_handshake_bytes)
+
+        if not hmac.compare_digest(peer_identity, trusted_peer_identity):
+            raise AuthenticationError("handshake identity does not match pinned key")
+        
+        if payload[self.name] != expected_peer_name:
+            raise AuthenticationError("Invalid name for handshake")
+        
+        peer_identity_key = ed25519.Ed25519PublicKey.from_public_bytes(peer_identity)
+
+        try: 
+            peer_identity_key.verify(signature, _canonical_json(json))
+        except InvalidSignature as e:
+            raise AuthenticationError("Invalid handshake") from e
+
+        # Phase 3: common transcript
+        # - canonicalize the complete local and peer handshakes;
+        # - order them *initiator first, responder second* on both endpoints;
+        # - concatenate a protocol label and the two length-prefixed handshakes;
+        # - compute SHA-256 of that transcript
+
+        local_handshake = self._pending_handshake
+        peer_handshake = _canonical_json(wire)
+
+        if role == "initiator":
+            first, second = local_handshake, peer_handshake
+        else:
+            first, second = peer_handshake, local_handshake
+
+        transcript = (b"CSC364 authenticated handshake"+ _length_prefix(first)+ _length_prefix(second))
+
+        transcript_hash = hashlib.sha256(transcript).digest()
+
+        # Phase 4: secret derivation
+        # - perform ECDH with the pending private key and authenticated peer key;
+        # - derive a transcript-bound root key with HKDF;
+        # - derive independently labelled initiator-to-responder and responder-to-initiator chain keys from the root.
+
+        shared_secret = derive_shared_secret(self._pending_ecdh_private, peer_ecdh_public)
+
+        root_key = hkdf_expand(shared_secret, info=b"CSC364-v2 root key" + transcript_hash, salt=transcript_hash)
+
+        initiator_to_responder = hkdf_expand(root_key, info=b"CSC364-v2 initiator-to-responder chain" + transcript_hash, salt=transcript_hash)
+
+        responder_to_initiator = hkdf_expand(root_key, info=b"CSC364-v2 responder-to-initiator chain" + transcript_hash, salt=transcript_hash)
+
+        session_id = hashlib.sha256(b"CSC364-v2 session id" + transcript_hash).hexdigest()
+
+        # Phase 5: atomic commit
+        # - derive/store a transcript-bound session ID;
+        # - assign chains/direction strings according to the local role;
+        # - reset counters and skipped keys; and
+        # - clear pending ECDH private state.
+
+        if role == "initiator":
+            self.sending_key = initiator_to_responder
+            self.receiving_key = responder_to_initiator
+            self.send_direction = "initiator-to-responder"
+            self.receive_direction = "responder-to-initiator"
+        else:
+            self.sending_key = responder_to_initiator
+            self.receiving_key = initiator_to_responder
+            self.send_direction = "responder-to-initiator"
+            self.receive_direction = "initiator-to-responder"
+
+        self.session_id = session_id
+        self.send_count = 0
+        self.receive_count = 0
+        self._skipped_message_keys = {}
+        self._pending_ecdh_private = None
+        self._pending_handshake = None
 
     def send(self, plaintext):
         """TODO: Encrypt one message and advance the sending chain.

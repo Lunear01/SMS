@@ -189,7 +189,7 @@ def validate_private_keys(private_key):
     """ Validates public keys only """
 
     if not isinstance(private_key, ec.EllipticCurvePrivateKey):
-        raise ValueError
+        raise TypeError("private_key must be an EllipticCurvePrivateKey")
     
     if not isinstance(private_key.curve, ec.SECP384R1):
         raise ValueError
@@ -200,7 +200,7 @@ def validate_public_keys(public_key):
     """ Validates private keys only """
 
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
-        raise ValueError
+        raise TypeError("public_key must be an EllipticCurvePublicKey")
     
     if not isinstance(public_key.curve, ec.SECP384R1):
         raise ValueError
@@ -218,7 +218,15 @@ def hkdf_expand(secret, info=b"secure chat", salt=None):
     ``info`` is a domain-separation label.  Different purposes (root key,
     direction, next chain, message key) require different labels.
     """
-    return HKDF(algorithm=hashes.SHA256(), length = 32, salt = salt, info = info).derive(secret)
+    if not isinstance(secret, bytes):
+        raise TypeError("secret must be bytes")
+    if not secret:
+        raise ValueError("secret must be non-empty")
+    if not isinstance(info, bytes):
+        raise TypeError("info must be bytes")
+    if salt is not None and not isinstance(salt, bytes):
+        raise TypeError("salt must be bytes or None")
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=info).derive(secret)
 
 def ratchet_key(chain_key):
     """Return ``(next_chain_key, one_time_message_key)``.
@@ -232,6 +240,10 @@ def ratchet_key(chain_key):
     Validate that the input is exactly 32 bytes.  The two outputs must be
     deterministic for synchronized peers but different from each other.
     """
+    if not isinstance(chain_key, bytes):
+        raise TypeError("chain_key must be bytes")
+    if len(chain_key) != 32:
+        raise ValueError("chain_key must be exactly 32 bytes")
     next_chain_key = hkdf_expand(chain_key, info=b"CSC364-v2 symmetric ratchet|next-chain-key")
     one_time_message_key = hkdf_expand(chain_key, info=b"CSC364-v2 symmetric ratchet|message-key")
 
@@ -257,14 +269,14 @@ def encrypt_message(key, plaintext, aad=None):
     ciphertext.  Do not separate or truncate that tag.
     """
 
-    if not isinstance(key, bytes) or len(key) != 32:
-        raise ValueError
-
+    if not isinstance(key, bytes):
+        raise TypeError("key must be bytes")
+    if len(key) != 32:
+        raise ValueError("key must be 32 bytes")
     if not isinstance(plaintext, str):
-        raise ValueError
-
-    if not isinstance(aad, bytes) and aad is not None:
-        raise ValueError
+        raise TypeError("plaintext must be a string")
+    if aad is not None and not isinstance(aad, bytes):
+        raise TypeError("aad must be bytes or None")
 
     encoded_plaintext = plaintext.encode("utf-8")
 
@@ -334,6 +346,12 @@ def decrypt_message(key, message, aad=None):
     ``ProtocolError``.
     """
 
+    if not isinstance(key, bytes):
+        raise TypeError("key must be bytes")
+    if len(key) != 32:
+        raise ValueError("key must be 32 bytes")
+    if aad is not None and not isinstance(aad, bytes):
+        raise TypeError("aad must be bytes or None")
     nonce, ciphertext_and_tag = _decode_ciphertext_message(message)
 
     plaintext_bytes = AESGCM(key).decrypt(nonce, ciphertext_and_tag, aad)

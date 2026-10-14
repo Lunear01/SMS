@@ -54,7 +54,7 @@ available wording does not express your intended experiment.
 > - **Explanation:** explain which identity or signed-transcript check your
 >   substitution tests and what the control would demonstrate.
 
-**Attack:** Self-signed identity using the same name
+**Attack:** Use a self-signed identity with the same name
 
 **Expected result:** Raises AuthenticationError
 
@@ -102,15 +102,15 @@ available wording does not express your intended experiment.
 > - **Explanation:** connect the state prediction and control to what happens
 >   after a failed decryption.
 
-**Attack:** TODO
+**Attack:** Flip the first bit of ct
 
-**Expected result:** TODO
+**Expected result:** InvalidTag
 
-**State after rejection:** TODO
+**State after rejection:** Recv state doesn't change
 
-**Control:** TODO
+**Control:** Retry the orig msg
 
-**Explanation:** TODO
+**Explanation:** After a failed decryption, the receiving state does not commit, therefore its state remains the same.  
 
 ## Replay after reordering
 
@@ -131,17 +131,17 @@ available wording does not express your intended experiment.
 > - **Explanation:** explain how the chosen order exercises skipped keys and
 >   why the later delivery is a replay.
 
-**Delivery order:** TODO
+**Delivery order:** 2, 0, 1
 
-**Replay message:** TODO
+**Replay message:** 1
 
-**Expected result:** TODO
+**Expected result:** ReplayError
 
-**State after rejection:** TODO
+**State after rejection:** Recv state doesn't change
 
-**Control:** TODO
+**Control:** Accept each msg once, then exchange msgs in the same sess
 
-**Explanation:** TODO
+**Explanation:** The chosen order skips keys since message 2 arrives first, therefore the receiver ratches through positions 0 and 1, saving their keys as skipped keys, and setting receive_count to 3.  When the adversary replays message 1, since 1 < receive_count, and no key is retained for it, a ReplayError is thrown.
 
 ## Old-session rejection
 
@@ -162,12 +162,12 @@ available wording does not express your intended experiment.
 > - **Explanation:** explain how your chosen message distinguishes session
 >   separation from rejecting a message that has already been consumed.
 
-**Attack:** TODO
+**Attack:** Undelivered msg from the prev sess
 
-**Expected result:** TODO
+**Expected result:** ProtocolError
 
-**State after rejection:** TODO
+**State after rejection:** Recv state stays the same
 
-**Control:** TODO
+**Control:** Exchange msgs in the fresh sess
 
-**Explanation:** TODO
+**Explanation:** The old message's session_id does not match the session_id from the fresh session
